@@ -2,7 +2,7 @@ use crate::dbs::Session;
 use crate::err::Error;
 use crate::iam::{token::Claims, Actor, Auth, Level, Role};
 use crate::kvs::{Datastore, LockType::*, TransactionType::*};
-use crate::sql::{statements::DefineUserStatement, Algorithm, Value};
+use crate::sql::{statements::DefineUserStatement, Algorithm, Object, Value};
 use crate::syn;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64_lib::Engine;
@@ -111,7 +111,7 @@ pub async fn basic(
 	}
 }
 
-pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Result<(), Error> {
+pub async fn token(kvs: &Datastore, session: &mut Session, token: &str, vars: Option<Object>) -> Result<(), Error> {
 	// Log the authentication type
 	trace!("Attempting token authentication");
 	// Decode the token without verifying
@@ -132,8 +132,55 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			return Err(Error::InvalidAuth);
 		}
 	}
+
+	let effective_claims: Claims;
+	// Check if additional variables were provided 
+	if let Some(vars) = vars {
+		// Parse the specified variables
+		let ns = vars.get("NS").or_else(|| vars.get("ns"));
+		let db = vars.get("DB").or_else(|| vars.get("db"));
+		let sc = vars.get("SC").or_else(|| vars.get("sc"));
+		let tk = vars.get("TK").or_else(|| vars.get("tk"));
+		// If some claims are not present in the token, the values may be obtained from variables
+		effective_claims = match (ns, db, sc, tk) {
+			(Some(ns), Some(db), Some(sc), Some(tk)) => {
+				Claims{
+					ns: token_data.claims.ns.or(Some(ns.to_raw_string())),
+					db: token_data.claims.db.or(Some(db.to_raw_string())),
+					sc: token_data.claims.sc.or(Some(sc.to_raw_string())),
+					tk: token_data.claims.tk.or(Some(tk.to_raw_string())),
+					..token_data.claims
+				}
+			}
+			(Some(ns), Some(db), None, Some(tk)) => {
+				Claims{
+					ns: token_data.claims.ns.or(Some(ns.to_raw_string())),
+					db: token_data.claims.db.or(Some(db.to_raw_string())),
+					tk: token_data.claims.tk.or(Some(tk.to_raw_string())),
+					..token_data.claims
+				}
+			}
+			(Some(ns), None, None, Some(tk)) => {
+				Claims{
+					ns: token_data.claims.ns.or(Some(ns.to_raw_string())),
+					tk: token_data.claims.tk.or(Some(tk.to_raw_string())),
+					..token_data.claims
+				}
+			}
+			(None, None, None, Some(tk)) => {
+				Claims{
+					tk: token_data.claims.tk.or(Some(tk.to_raw_string())),
+					..token_data.claims
+				}
+			}
+			_ => token_data.claims,
+		}
+	} else {
+		effective_claims = token_data.claims;
+	}
+
 	// Check the token authentication claims
-	match token_data.claims {
+	match effective_claims {
 		// Check if this is scope token authentication
 		Claims {
 			ns: Some(ns),
@@ -223,7 +270,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Verify the token
 			decode::<Claims>(token, &cf.0, &cf.1)?;
 			// Parse the roles
-			let roles = match token_data.claims.roles {
+			let roles = match effective_claims.roles {
 				// If no role is provided, grant the viewer role
 				None => vec![Role::Viewer],
 				// If roles are provided, parse them
@@ -292,7 +339,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			// Verify the token
 			decode::<Claims>(token, &cf.0, &cf.1)?;
 			// Parse the roles
-			let roles = match token_data.claims.roles {
+			let roles = match effective_claims.roles {
 				// If no role is provided, grant the viewer role
 				None => vec![Role::Viewer],
 				// If roles are provided, parse them
@@ -738,7 +785,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_ok(), "Failed to signin with token: {:?}", res);
 			assert_eq!(sess.ns, Some("test".to_string()));
@@ -762,7 +809,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_ok(), "Failed to signin with token: {:?}", res);
 			assert_eq!(sess.ns, Some("test".to_string()));
@@ -786,7 +833,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_err(), "Unexpected success signing in with token: {:?}", res);
 		}
@@ -802,7 +849,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_err(), "Unexpected success signing in with token: {:?}", res);
 		}
@@ -844,7 +891,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_ok(), "Failed to signin with token: {:?}", res);
 			assert_eq!(sess.ns, Some("test".to_string()));
@@ -869,7 +916,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_ok(), "Failed to signin with token: {:?}", res);
 			assert_eq!(sess.ns, Some("test".to_string()));
@@ -894,7 +941,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_err(), "Unexpected success signing in with token: {:?}", res);
 		}
@@ -910,7 +957,7 @@ mod tests {
 			let enc = encode(&HEADER, &claims, &key).unwrap();
 			// Signin with the token
 			let mut sess = Session::default();
-			let res = token(&ds, &mut sess, &enc).await;
+			let res = token(&ds, &mut sess, &enc, None).await;
 
 			assert!(res.is_err(), "Unexpected success signing in with token: {:?}", res);
 		}

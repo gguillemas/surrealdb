@@ -575,10 +575,12 @@ where
 	/// # Ok(())
 	/// # }
 	/// ```
-	pub fn authenticate(&self, token: impl Into<Jwt>) -> Authenticate<C> {
+	pub fn authenticate<R>(&self, token: impl Into<Jwt>, credentials: impl Credentials<auth::Signin, R>) -> Authenticate<C, R> {
 		Authenticate {
 			router: self.router.extract(),
 			token: token.into(),
+			credentials: to_value(credentials).map_err(Into::into),
+			response_type: PhantomData,
 		}
 	}
 

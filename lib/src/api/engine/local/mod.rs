@@ -490,11 +490,16 @@ async fn router(
 			Ok(DbResponse::Other(response.into()))
 		}
 		Method::Authenticate => {
-			let token = match &mut params[..] {
-				[Value::Strand(Strand(token))] => mem::take(token),
+			let (token, credentials) = match &mut params[..] {
+				[Value::Strand(Strand(token)), Value::Object(credentials)] => {
+					(mem::take(token), Some(mem::take(credentials)))
+				},
+				[Value::Strand(Strand(token))] => {
+					(mem::take(token), None)
+				}
 				_ => unreachable!(),
 			};
-			crate::iam::verify::token(kvs, session, &token).await?;
+			crate::iam::verify::token(kvs, session, &token, credentials).await?;
 			Ok(DbResponse::Other(Value::None))
 		}
 		Method::Invalidate => {
@@ -561,7 +566,7 @@ async fn router(
 		Method::Export => {
 			let ns = session.ns.clone().unwrap_or_default();
 			let db = session.db.clone().unwrap_or_default();
-			let (tx, rx) = crate::channel::new(1);
+			let (tx, rx) = crate::channel::bounded(1);
 
 			match (param.file, param.bytes_sender) {
 				(Some(path), None) => {
